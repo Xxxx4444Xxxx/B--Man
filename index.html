@@ -7,24 +7,32 @@
   <style>
     html, body { height: 100%; margin: 0; background: #05040a; color:#f1eaff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
     #wrap { position: fixed; inset: 0; display: grid; grid-template-rows: auto 1fr; }
-    #hud { padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; font-family: monospace; text-shadow: 0 0 6px #9a6bff; z-index: 3; }
+    #hud { padding: 8px 10px; display: flex; gap: 8px; justify-content: space-between; align-items: center; font-family: monospace; text-shadow: 0 0 6px #9a6bff; z-index: 3; flex-wrap: wrap; }
     #canvas { width: 100%; height: 100%; display: block; box-shadow: inset 0 0 48px rgba(138,92,255,.35); image-rendering: pixelated; background: #000; }
     .crt::after { content:''; position:fixed; inset:0; pointer-events:none; background: repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0, rgba(255,255,255,0.04) 1px, rgba(0,0,0,0) 2px); mix-blend-mode: overlay; z-index:2; }
     #joystick { position: fixed; left: 14px; bottom: 14px; width: 140px; height: 140px; border-radius: 50%; border: 1px solid #9a6bff55; touch-action: none; z-index: 4; }
     #stick { position: absolute; width: 60px; height: 60px; left: 40px; top: 40px; border-radius: 50%; background:#9a6bff55; border:1px solid #9a6bffaa; }
-    #btnMute { position: fixed; right: 14px; bottom: 14px; background: rgba(20,16,40,.85); border: 1px solid #9a6bff; color: #f1eaff; padding: 8px 12px; border-radius: 8px; font-family: monospace; z-index: 4; }
+    .btn { background: rgba(20,16,40,.85); border: 1px solid #9a6bff; color: #f1eaff; padding: 6px 10px; border-radius: 8px; font-family: monospace; }
+    #btnMute { position: fixed; right: 14px; bottom: 14px; z-index: 4; }
+    #legend { font-size: 12px; opacity: .85; }
   </style>
 </head>
 <body class="crt">
   <div id="wrap">
-    <div id="hud"><div id="score">Bö-Man · Score: 0 · Lives: 3</div><div id="status">Ready!</div></div>
+    <div id="hud">
+      <div id="score">Bö-Man · Score: 0 · Lives: 3</div>
+      <div id="status">Ready!</div>
+      <div style="display:flex; gap:6px; margin-left:auto">
+        <button id="btnControl" class="btn">Steuerung: Joystick</button>
+        <button id="btnMute" class="btn">🔊</button>
+      </div>
+    </div>
     <canvas id="canvas" width="456" height="552"></canvas>
   </div>
   <div id="joystick"><div id="stick"></div></div>
-  <button id="btnMute">🔊</button>
 
 <script>
-// ===== Vanilla Bö-Man (kein Framework, keine externen Dateien) =====
+// ===== Vanilla Bö-Man (Single file) =====
 const TILE = 24;    // sichtbare Kachelgröße
 const COLS = 19, ROWS = 23;
 const W = COLS*TILE, H = ROWS*TILE;
@@ -38,8 +46,9 @@ canvas.width = W; canvas.height = H;
 const scoreEl = document.getElementById('score');
 const statusEl = document.getElementById('status');
 const btnMute = document.getElementById('btnMute');
+const btnControl = document.getElementById('btnControl');
 
-// Maze: 0 leer, 1 Wand, 2 Pflanze, 3 Powerup (zufällig zugewiesen)
+// Maze: 0 leer, 1 Wand, 2 Pflanze, 3 Powerup (zufällig)
 const MAZE = [
   '1111111111111111111',
   '1000000002000000001',
@@ -71,6 +80,7 @@ let plants = new Set();
 let powerups = new Map(); // key "c,r" -> type ('super'|'slow'|'magnet')
 let walls = new Set();
 let score = 0, lives = 3, running = true, muted = false;
+let floatTexts = []; // {x,y,life}
 
 function key(c, r){ return c+','+r; }
 function inBounds(c,r){ return r>=0 && r<ROWS && c>=0 && c<COLS; }
@@ -106,16 +116,25 @@ const enemies = [
 
 // Input (Keyboard)
 const keys = {ArrowLeft:0,ArrowRight:0,ArrowUp:0,ArrowDown:0};
-addEventListener('keydown', e=>{ if(e.key in keys){ keys[e.key]=1; e.preventDefault(); } });
+addEventListener('keydown', e=>{ if(e.key in keys){ keys[e.key]=1; e.preventDefault(); try{AC.resume()}catch{} } });
 addEventListener('keyup',   e=>{ if(e.key in keys){ keys[e.key]=0; e.preventDefault(); } });
+
+// Control mode
+let controlMode = 'joystick'; // 'joystick' | 'swipe'
+btnControl.addEventListener('click', ()=>{
+  controlMode = controlMode==='joystick' ? 'swipe' : 'joystick';
+  btnControl.textContent = 'Steuerung: ' + (controlMode==='joystick'?'Joystick':'Wisch');
+  document.getElementById('joystick').style.display = controlMode==='joystick' ? 'block' : 'none';
+});
 
 // Input (Joystick)
 const joyRoot = document.getElementById('joystick');
 const joyStick = document.getElementById('stick');
 let joy = {active:false, sx:0, sy:0, dir:null};
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-joyRoot.addEventListener('pointerdown', e=>{ e.preventDefault(); joy.active=true; joy.sx=e.clientX; joy.sy=e.clientY; });
+joyRoot.addEventListener('pointerdown', e=>{ if(controlMode!=='joystick') return; e.preventDefault(); joy.active=true; joy.sx=e.clientX; joy.sy=e.clientY; try{AC.resume()}catch{} });
 addEventListener('pointermove', e=>{
+  if(controlMode!=='joystick') return;
   if(!joy.active) return;
   const dx=e.clientX-joy.sx, dy=e.clientY-joy.sy;
   const max=40, nx=clamp(dx,-max,max), ny=clamp(dy,-max,max);
@@ -124,21 +143,39 @@ addEventListener('pointermove', e=>{
     if (Math.abs(dx)>Math.abs(dy)) joy.dir = dx>0?'right':'left'; else joy.dir = dy>0?'down':'up';
   } else joy.dir=null;
 });
-addEventListener('pointerup', ()=>{ joy.active=false; joy.dir=null; joyStick.style.transform='translate(0,0)'; });
+addEventListener('pointerup', ()=>{ if(controlMode!=='joystick') return; joy.active=false; joy.dir=null; joyStick.style.transform='translate(0,0)'; });
+
+// Input (Swipe on canvas)
+let swipe = {active:false, sx:0, sy:0};
+canvas.addEventListener('pointerdown', e=>{
+  if(controlMode!=='swipe') return;
+  swipe.active=true; swipe.sx=e.clientX; swipe.sy=e.clientY; try{AC.resume()}catch{};
+});
+canvas.addEventListener('pointerup', e=>{
+  if(controlMode!=='swipe' || !swipe.active) return;
+  swipe.active=false;
+  const dx = e.clientX - swipe.sx;
+  const dy = e.clientY - swipe.sy;
+  const th = 20;
+  if (Math.abs(dx)<th && Math.abs(dy)<th) return;
+  if (Math.abs(dx) > Math.abs(dy)) joy.dir = dx>0 ? 'right' : 'left';
+  else joy.dir = dy>0 ? 'down' : 'up';
+});
 
 // Audio (simple beeps)
 const AC = new (window.AudioContext||window.webkitAudioContext)();
 function beep(freq, dur=0.08, vol=0.15){
   if (muted) return;
+  if (AC.state==='suspended'){ try{AC.resume()}catch{} }
   const o = AC.createOscillator();
   const g = AC.createGain();
   o.type='square'; o.frequency.value=freq;
   g.gain.value=vol;
   o.connect(g); g.connect(AC.destination);
   o.start();
-  setTimeout(()=>{ o.stop(); }, dur*1000);
+  setTimeout(()=>{ try{o.stop()}catch{} }, dur*1000);
 }
-btnMute.addEventListener('click', ()=>{ muted=!muted; btnMute.textContent = muted?'🔇':'🔊'; });
+btnMute.addEventListener('click', ()=>{ muted=!muted; btnMute.textContent = muted?'🔇':'🔊'; try{AC.resume()}catch{} });
 
 function gridBlocked(nx, ny){
   const c = Math.floor(nx), r = Math.floor(ny);
@@ -165,10 +202,9 @@ function step(dt){
   if (dir==='right') vx= sp;
   if (dir==='up')    vy=-sp;
   if (dir==='down')  vy= sp;
-  // collision with walls (simple AABB in grid units)
-  const nx = player.x + vx*dt/16/ TILE; // normalize speed roughly
+  // collision with walls
+  const nx = player.x + vx*dt/16/ TILE;
   const ny = player.y + vy*dt/16/ TILE;
-  // check next cell center
   if (!gridBlocked(nx, player.y)) player.x = nx;
   if (!gridBlocked(player.x, ny)) player.y = ny;
 
@@ -179,6 +215,8 @@ function step(dt){
     plants.delete(pkey);
     score += 10; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
     beep(520,0.05,0.12);
+    // floating "Bö"
+    floatTexts.push({x: player.x*TILE, y: player.y*TILE - 8, life: 0});
     if (plants.size===0){ statusEl.textContent='Level geschafft!'; beep(880,0.2,0.2); }
   }
   // powerups
@@ -198,12 +236,10 @@ function step(dt){
       const dx = (c+0.5) - player.x, dy = (r+0.5) - player.y;
       const d = Math.hypot(dx,dy);
       if (d < range && d>0.01){
-        const nx = (c+0.5) - dx/d*0.05;
-        const ny = (r+0.5) - dy/d*0.05;
-        // if moved enough across cell center, count as eaten
-        if (Math.hypot(nx-(c+0.5), ny-(r+0.5))>0.3){
+        if (d < 0.2){ // auto eat if very close
           plants.delete(k);
           score += 10; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
+          floatTexts.push({x: player.x*TILE, y: player.y*TILE - 8, life: 0});
           beep(520,0.05,0.12);
         }
       }
@@ -243,6 +279,7 @@ function step(dt){
         e.x = 9.5; e.y = 11.5; e.dir = null;
         score += 200; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
         beep(560,0.06,0.2);
+        floatTexts.push({x: player.x*TILE, y: player.y*TILE - 8, life: 0});
       } else {
         lives -= 1; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
         statusEl.textContent = lives>0 ? 'Autsch! Weiter…' : 'Game Over';
@@ -252,6 +289,10 @@ function step(dt){
       }
     }
   });
+
+  // update floating texts
+  floatTexts.forEach(ft => ft.life += dt);
+  floatTexts = floatTexts.filter(ft => ft.life < 800);
 }
 
 function willHitWall(ent, dir, s, dt){
@@ -271,12 +312,54 @@ function dirsAt(x,y){
   if (inBounds(c-1,r) && !isWall(c-1,r)) opts.push('left');
   if (inBounds(c+1,r) && !isWall(c+1,r)) opts.push('right');
   if (inBounds(c,r-1) && !isWall(c,r-1)) opts.push('up');
-  if (inBounds(c,r+1) && !isWall(c,r+1)) opts.push('down');
+  if (inBounds(c,r+1,r) && !isWall(c,r+1)) opts.push('down');
   return opts;
 }
 function opposite(d){ return d==='left'?'right':d==='right'?'left':d==='up'?'down':d==='down'?'up':null; }
 
-// ---- Render ----
+// ---- Render helpers ----
+function drawFlower(x,y){
+  // x,y are pixel center
+  ctx.save();
+  // stem
+  ctx.strokeStyle = '#38a43a';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y+6); ctx.stroke();
+  // petals
+  ctx.fillStyle = '#ff7ad9';
+  for (let i=0;i<6;i++){
+    const a = i * Math.PI/3;
+    ctx.beginPath(); ctx.arc(x + Math.cos(a)*5, y + Math.sin(a)*5, 3, 0, Math.PI*2); ctx.fill();
+  }
+  // center
+  ctx.fillStyle = '#ffd25a';
+  ctx.beginPath(); ctx.arc(x, y, 3.2, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawFly(x,y, frightened){
+  // body
+  ctx.save();
+  ctx.translate(x,y);
+  // wings
+  ctx.globalAlpha = 0.75;
+  ctx.fillStyle = '#bfe9ff';
+  ctx.beginPath(); ctx.ellipse(-6, -8, 6, 4, -0.4, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(6, -8, 6, 4, 0.4, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1;
+  // body
+  ctx.fillStyle = frightened ? '#5ac8ff' : '#2e2e3a';
+  ctx.beginPath(); ctx.ellipse(0, 0, 9, 7, 0, 0, Math.PI*2); ctx.fill();
+  // head
+  ctx.fillStyle = frightened ? '#5ac8ff' : '#2e2e3a';
+  ctx.beginPath(); ctx.arc(0, -7, 4, 0, Math.PI*2); ctx.fill();
+  // eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-3,-9,2,2);
+  ctx.fillRect(1,-9,2,2);
+  ctx.restore();
+}
+
 function draw(){
   ctx.clearRect(0,0,W,H);
   // walls
@@ -290,37 +373,30 @@ function draw(){
       }
     }
   }
-  // plants
+  // plants -> flowers
   plants.forEach(k=>{
     const [c,r] = k.split(',').map(Number);
     const x = c*TILE + TILE/2, y = r*TILE + TILE/2;
-    ctx.fillStyle = '#6de06d';
-    ctx.fillRect(x-3, y-3, 6, 6);
-    ctx.fillRect(x-2, y-8, 4, 5);
+    drawFlower(x, y);
   });
   // powerups
   powerups.forEach((kind,k)=>{
     const [c,r]=k.split(',').map(Number);
     const x=c*TILE+TILE/2, y=r*TILE+TILE/2;
     ctx.fillStyle = kind==='super' ? '#ff7ad9' : kind==='slow' ? '#ffd25a' : '#7aa8ff';
-    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI*2); ctx.fill();
   });
-  // enemies
+  // enemies -> flies
   enemies.forEach(e=>{
     const x=e.x*TILE, y=e.y*TILE;
-    ctx.fillStyle = (player.super>0) ? '#5ac8ff' : '#ff6b8a';
-    ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.fill();
-    // simple eyes
-    ctx.fillStyle='#fff';
-    ctx.fillRect(x-5, y-6, 3, 3);
-    ctx.fillRect(x+2, y-6, 3, 3);
+    drawFly(x, y, player.super>0);
   });
   // player (violett mit Outline + Mund)
   const px = player.x*TILE, py=player.y*TILE;
   ctx.lineWidth=3; ctx.strokeStyle='#000';
-  ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(px, py, 10.5, 0, Math.PI*2); ctx.stroke();
   ctx.fillStyle='#b36bff';
-  ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px, py, 10.5, 0, Math.PI*2); ctx.fill();
   // mouth wedge
   const t = (Date.now()>>7)%2===0 ? 0.5 : 0.2;
   let angStart = -t, angEnd = t;
@@ -329,11 +405,24 @@ function draw(){
   if (keys.ArrowUp || joy.dir==='up'){ angStart = -Math.PI/2 - t; angEnd = -Math.PI/2 + t; }
   if (keys.ArrowDown || joy.dir==='down'){ angStart = Math.PI/2 - t; angEnd = Math.PI/2 + t; }
   ctx.fillStyle = '#05040a';
-  ctx.beginPath(); ctx.moveTo(px,py); ctx.arc(px,py,10,angStart,angEnd,false); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(px,py); ctx.arc(px,py,10.6,angStart,angEnd,false); ctx.closePath(); ctx.fill();
   // eyes
   ctx.fillStyle='#fff';
   ctx.beginPath(); ctx.arc(px-3, py-4, 2, 0, Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(px+3, py-4, 2, 0, Math.PI*2); ctx.fill();
+
+  // floating "Bö" texts
+  floatTexts.forEach(ft=>{
+    const a = 1 - ft.life/800;
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.font = 'bold 14px monospace';
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 3;
+    ctx.strokeText('Bö', ft.x-8, ft.y - ft.life*0.05);
+    ctx.fillStyle = '#b36bff';
+    ctx.fillText('Bö', ft.x-8, ft.y - ft.life*0.05);
+    ctx.globalAlpha = 1;
+  });
 }
 
 let last = performance.now();
