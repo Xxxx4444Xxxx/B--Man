@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Bö-Man</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #05040a; color:#f1eaff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #wrap { position: fixed; inset: 0; display: grid; grid-template-rows: auto 1fr; }
+    #hud { padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; font-family: monospace; text-shadow: 0 0 6px #9a6bff; z-index: 3; }
+    #canvas { width: 100%; height: 100%; display: block; box-shadow: inset 0 0 48px rgba(138,92,255,.35); image-rendering: pixelated; background: #000; }
+    .crt::after { content:''; position:fixed; inset:0; pointer-events:none; background: repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0, rgba(255,255,255,0.04) 1px, rgba(0,0,0,0) 2px); mix-blend-mode: overlay; z-index:2; }
+    #joystick { position: fixed; left: 14px; bottom: 14px; width: 140px; height: 140px; border-radius: 50%; border: 1px solid #9a6bff55; touch-action: none; z-index: 4; }
+    #stick { position: absolute; width: 60px; height: 60px; left: 40px; top: 40px; border-radius: 50%; background:#9a6bff55; border:1px solid #9a6bffaa; }
+    #btnMute { position: fixed; right: 14px; bottom: 14px; background: rgba(20,16,40,.85); border: 1px solid #9a6bff; color: #f1eaff; padding: 8px 12px; border-radius: 8px; font-family: monospace; z-index: 4; }
+  </style>
+</head>
+<body class="crt">
+  <div id="wrap">
+    <div id="hud"><div id="score">Bö-Man · Score: 0 · Lives: 3</div><div id="status">Ready!</div></div>
+    <canvas id="canvas" width="456" height="552"></canvas>
+  </div>
+  <div id="joystick"><div id="stick"></div></div>
+  <button id="btnMute">🔊</button>
+
+<script>
+// ===== Vanilla Bö-Man (kein Framework, keine externen Dateien) =====
+const TILE = 24;    // sichtbare Kachelgröße
+const COLS = 19, ROWS = 23;
+const W = COLS*TILE, H = ROWS*TILE;
+const SPEED_PLAYER = 2.1;
+const SPEED_ENEMY  = 1.7;
+const DUR = { super: 10000, slow: 6000, magnet: 8000 };
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+canvas.width = W; canvas.height = H;
+
+const scoreEl = document.getElementById('score');
+const statusEl = document.getElementById('status');
+const btnMute = document.getElementById('btnMute');
+
+// Maze: 0 leer, 1 Wand, 2 Pflanze, 3 Powerup (zufällig zugewiesen)
+const MAZE = [
+  '1111111111111111111',
+  '1000000002000000001',
+  '1011110111110111101',
+  '1020010203020200021',
+  '1011011110111110111',
+  '1001010000100001011',
+  '1111010111101111011',
+  '1003020100020103021',
+  '1011110111100111101',
+  '1000020003000200021',
+  '1111011110111110111',
+  '1001010000100001001',
+  '1020010203020200021',
+  '1011110111110111101',
+  '1000000100000100001',
+  '1111110111101111111',
+  '1000020002000200001',
+  '1011110111110111101',
+  '1000000100000100001',
+  '1011110111101111101',
+  '1000000002000000001',
+  '1011111110111111101',
+  '1111111111111111111',
+].map(r => r.split('').map(ch => +ch));
+
+// Game state
+let plants = new Set();
+let powerups = new Map(); // key "c,r" -> type ('super'|'slow'|'magnet')
+let walls = new Set();
+let score = 0, lives = 3, running = true, muted = false;
+
+function key(c, r){ return c+','+r; }
+function inBounds(c,r){ return r>=0 && r<ROWS && c>=0 && c<COLS; }
+
+// init tiles
+for (let r=0;r<ROWS;r++){
+  for (let c=0;c<COLS;c++){
+    if (MAZE[r][c]===1) walls.add(key(c,r));
+    if (MAZE[r][c]===2) plants.add(key(c,r));
+    if (MAZE[r][c]===3){
+      const types = ['super','slow','magnet'];
+      powerups.set(key(c,r), types[Math.floor(Math.random()*types.length)]);
+    }
+  }
+}
+function isWall(c,r){ return walls.has(key(c,r)); }
+
+// Entities
+function spawnFree(){
+  for (let r=ROWS-2;r>=1;r--){
+    for (let c=1;c<COLS-1;c++){
+      if (!isWall(c,r)) return {x:c+0.5, y:r+0.5};
+    }
+  }
+  return {x:1.5,y:1.5};
+}
+const player = { ...spawnFree(), vx:0, vy:0, dir:'left', super:0, slow:0, magnet:0, mouth:0 };
+const enemies = [
+  {x:9.5, y:11.5, dir:'left'},
+  {x:9.5, y:9.5,  dir:'up'},
+  {x:9.5, y:13.5, dir:'down'},
+];
+
+// Input (Keyboard)
+const keys = {ArrowLeft:0,ArrowRight:0,ArrowUp:0,ArrowDown:0};
+addEventListener('keydown', e=>{ if(e.key in keys){ keys[e.key]=1; e.preventDefault(); } });
+addEventListener('keyup',   e=>{ if(e.key in keys){ keys[e.key]=0; e.preventDefault(); } });
+
+// Input (Joystick)
+const joyRoot = document.getElementById('joystick');
+const joyStick = document.getElementById('stick');
+let joy = {active:false, sx:0, sy:0, dir:null};
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+joyRoot.addEventListener('pointerdown', e=>{ e.preventDefault(); joy.active=true; joy.sx=e.clientX; joy.sy=e.clientY; });
+addEventListener('pointermove', e=>{
+  if(!joy.active) return;
+  const dx=e.clientX-joy.sx, dy=e.clientY-joy.sy;
+  const max=40, nx=clamp(dx,-max,max), ny=clamp(dy,-max,max);
+  joyStick.style.transform=`translate(${nx}px,${ny}px)`;
+  if (Math.hypot(dx,dy)>10){
+    if (Math.abs(dx)>Math.abs(dy)) joy.dir = dx>0?'right':'left'; else joy.dir = dy>0?'down':'up';
+  } else joy.dir=null;
+});
+addEventListener('pointerup', ()=>{ joy.active=false; joy.dir=null; joyStick.style.transform='translate(0,0)'; });
+
+// Audio (simple beeps)
+const AC = new (window.AudioContext||window.webkitAudioContext)();
+function beep(freq, dur=0.08, vol=0.15){
+  if (muted) return;
+  const o = AC.createOscillator();
+  const g = AC.createGain();
+  o.type='square'; o.frequency.value=freq;
+  g.gain.value=vol;
+  o.connect(g); g.connect(AC.destination);
+  o.start();
+  setTimeout(()=>{ o.stop(); }, dur*1000);
+}
+btnMute.addEventListener('click', ()=>{ muted=!muted; btnMute.textContent = muted?'🔇':'🔊'; });
+
+function gridBlocked(nx, ny){
+  const c = Math.floor(nx), r = Math.floor(ny);
+  return isWall(c, r);
+}
+
+function step(dt){
+  // timers
+  player.super = Math.max(0, player.super - dt);
+  player.slow  = Math.max(0, player.slow  - dt);
+  player.magnet= Math.max(0, player.magnet- dt);
+
+  // input → desired direction
+  let dir=null;
+  if (keys.ArrowLeft || joy.dir==='left') dir='left';
+  else if (keys.ArrowRight || joy.dir==='right') dir='right';
+  else if (keys.ArrowUp || joy.dir==='up') dir='up';
+  else if (keys.ArrowDown || joy.dir==='down') dir='down';
+
+  // move player
+  const sp = SPEED_PLAYER;
+  let vx=0, vy=0;
+  if (dir==='left')  vx=-sp;
+  if (dir==='right') vx= sp;
+  if (dir==='up')    vy=-sp;
+  if (dir==='down')  vy= sp;
+  // collision with walls (simple AABB in grid units)
+  const nx = player.x + vx*dt/16/ TILE; // normalize speed roughly
+  const ny = player.y + vy*dt/16/ TILE;
+  // check next cell center
+  if (!gridBlocked(nx, player.y)) player.x = nx;
+  if (!gridBlocked(player.x, ny)) player.y = ny;
+
+  // eat plants
+  const pc = Math.floor(player.x), pr = Math.floor(player.y);
+  const pkey = key(pc,pr);
+  if (plants.has(pkey)){
+    plants.delete(pkey);
+    score += 10; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
+    beep(520,0.05,0.12);
+    if (plants.size===0){ statusEl.textContent='Level geschafft!'; beep(880,0.2,0.2); }
+  }
+  // powerups
+  if (powerups.has(pkey)){
+    const kind = powerups.get(pkey);
+    powerups.delete(pkey);
+    if (kind==='super'){ player.super = DUR.super; statusEl.textContent='Super-Knospe!'; }
+    if (kind==='slow'){  player.slow  = DUR.slow;  statusEl.textContent='Zeitlupe!'; }
+    if (kind==='magnet'){player.magnet= DUR.magnet;statusEl.textContent='Magnet!'; }
+  }
+
+  // magnet pull
+  if (player.magnet>0){
+    const range = 2.5;
+    for (const k of [...plants]){
+      const [c,r] = k.split(',').map(Number);
+      const dx = (c+0.5) - player.x, dy = (r+0.5) - player.y;
+      const d = Math.hypot(dx,dy);
+      if (d < range && d>0.01){
+        const nx = (c+0.5) - dx/d*0.05;
+        const ny = (r+0.5) - dy/d*0.05;
+        // if moved enough across cell center, count as eaten
+        if (Math.hypot(nx-(c+0.5), ny-(r+0.5))>0.3){
+          plants.delete(k);
+          score += 10; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
+          beep(520,0.05,0.12);
+        }
+      }
+    }
+  }
+
+  // enemies
+  enemies.forEach(e=>{
+    const s = (player.slow>0 ? 0.45 : 1) * SPEED_ENEMY;
+    // pick random direction at intersections or when would hit wall
+    if (!e.dir || willHitWall(e, e.dir, s, dt)){
+      const opts = dirsAt(e.x, e.y);
+      if (opts.length){
+        const opp = opposite(e.dir);
+        const cand = opts.length>1 ? opts.filter(d=>d!==opp) : opts;
+        e.dir = cand[Math.floor(Math.random()*cand.length)];
+      }
+    }
+    // move
+    let vx=0, vy=0;
+    if (e.dir==='left') vx=-s;
+    if (e.dir==='right') vx=s;
+    if (e.dir==='up') vy=-s;
+    if (e.dir==='down') vy=s;
+    const nx = e.x + vx*dt/16/ TILE;
+    const ny = e.y + vy*dt/16/ TILE;
+    if (!gridBlocked(nx, e.y)) e.x = nx;
+    if (!gridBlocked(e.x, ny)) e.y = ny;
+  });
+
+  // collisions with enemies
+  enemies.forEach(e=>{
+    const d = Math.hypot(e.x - player.x, e.y - player.y);
+    if (d < 0.6){
+      if (player.super>0){
+        // eat enemy: respawn
+        e.x = 9.5; e.y = 11.5; e.dir = null;
+        score += 200; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
+        beep(560,0.06,0.2);
+      } else {
+        lives -= 1; scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
+        statusEl.textContent = lives>0 ? 'Autsch! Weiter…' : 'Game Over';
+        beep(140,0.3,0.25);
+        if (lives<=0){ running=false; }
+        else { const p = spawnFree(); player.x=p.x; player.y=p.y; }
+      }
+    }
+  });
+}
+
+function willHitWall(ent, dir, s, dt){
+  let vx=0,vy=0;
+  if (dir==='left') vx=-s;
+  if (dir==='right') vx=s;
+  if (dir==='up') vy=-s;
+  if (dir==='down') vy=s;
+  const nx = ent.x + vx*dt/16/ TILE;
+  const ny = ent.y + vy*dt/16/ TILE;
+  return gridBlocked(nx, ent.y) || gridBlocked(ent.x, ny);
+}
+
+function dirsAt(x,y){
+  const c=Math.floor(x), r=Math.floor(y);
+  const opts=[];
+  if (inBounds(c-1,r) && !isWall(c-1,r)) opts.push('left');
+  if (inBounds(c+1,r) && !isWall(c+1,r)) opts.push('right');
+  if (inBounds(c,r-1) && !isWall(c,r-1)) opts.push('up');
+  if (inBounds(c,r+1) && !isWall(c,r+1)) opts.push('down');
+  return opts;
+}
+function opposite(d){ return d==='left'?'right':d==='right'?'left':d==='up'?'down':d==='down'?'up':null; }
+
+// ---- Render ----
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // walls
+  for (let r=0;r<ROWS;r++){
+    for (let c=0;c<COLS;c++){
+      if (MAZE[r][c]===1){
+        ctx.fillStyle = '#2a2a3a';
+        ctx.fillRect(c*TILE, r*TILE, TILE, TILE);
+        ctx.strokeStyle = '#161621';
+        ctx.strokeRect(c*TILE+0.5, r*TILE+0.5, TILE-1, TILE-1);
+      }
+    }
+  }
+  // plants
+  plants.forEach(k=>{
+    const [c,r] = k.split(',').map(Number);
+    const x = c*TILE + TILE/2, y = r*TILE + TILE/2;
+    ctx.fillStyle = '#6de06d';
+    ctx.fillRect(x-3, y-3, 6, 6);
+    ctx.fillRect(x-2, y-8, 4, 5);
+  });
+  // powerups
+  powerups.forEach((kind,k)=>{
+    const [c,r]=k.split(',').map(Number);
+    const x=c*TILE+TILE/2, y=r*TILE+TILE/2;
+    ctx.fillStyle = kind==='super' ? '#ff7ad9' : kind==='slow' ? '#ffd25a' : '#7aa8ff';
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
+  });
+  // enemies
+  enemies.forEach(e=>{
+    const x=e.x*TILE, y=e.y*TILE;
+    ctx.fillStyle = (player.super>0) ? '#5ac8ff' : '#ff6b8a';
+    ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.fill();
+    // simple eyes
+    ctx.fillStyle='#fff';
+    ctx.fillRect(x-5, y-6, 3, 3);
+    ctx.fillRect(x+2, y-6, 3, 3);
+  });
+  // player (violett mit Outline + Mund)
+  const px = player.x*TILE, py=player.y*TILE;
+  ctx.lineWidth=3; ctx.strokeStyle='#000';
+  ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI*2); ctx.stroke();
+  ctx.fillStyle='#b36bff';
+  ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI*2); ctx.fill();
+  // mouth wedge
+  const t = (Date.now()>>7)%2===0 ? 0.5 : 0.2;
+  let angStart = -t, angEnd = t;
+  if (keys.ArrowLeft || joy.dir==='left'){ angStart = Math.PI - t; angEnd = -Math.PI + t; }
+  if (keys.ArrowRight || joy.dir==='right'){ angStart = -t; angEnd = t; }
+  if (keys.ArrowUp || joy.dir==='up'){ angStart = -Math.PI/2 - t; angEnd = -Math.PI/2 + t; }
+  if (keys.ArrowDown || joy.dir==='down'){ angStart = Math.PI/2 - t; angEnd = Math.PI/2 + t; }
+  ctx.fillStyle = '#05040a';
+  ctx.beginPath(); ctx.moveTo(px,py); ctx.arc(px,py,10,angStart,angEnd,false); ctx.closePath(); ctx.fill();
+  // eyes
+  ctx.fillStyle='#fff';
+  ctx.beginPath(); ctx.arc(px-3, py-4, 2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+3, py-4, 2, 0, Math.PI*2); ctx.fill();
+}
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(32, now-last); last = now;
+  if (running) step(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
